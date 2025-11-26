@@ -4,7 +4,7 @@ import db_handler
 
 # Page configuration
 st.set_page_config(
-    page_title="Sistema de Gestão de Multas",
+    page_title="Sistema de Gestão Logistica",
     page_icon="🚗",
     layout="wide"
 )

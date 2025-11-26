@@ -97,6 +97,16 @@ def init_db():
         cursor.execute("ALTER TABLE viagens ADD COLUMN distancia REAL DEFAULT 0")
     except sqlite3.OperationalError:
         pass # Column already exists
+
+    try:
+        cursor.execute("ALTER TABLE multas ADD COLUMN hora_infracao TEXT")
+    except sqlite3.OperationalError:
+        pass # Column already exists
+
+    try:
+        cursor.execute("ALTER TABLE multas ADD COLUMN viagem_id INTEGER REFERENCES viagens(id)")
+    except sqlite3.OperationalError:
+        pass # Column already exists
     
     conn.commit()
     conn.close()

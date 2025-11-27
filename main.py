@@ -9,6 +9,17 @@ st.set_page_config(
     layout="wide"
 )
 
+# Hide Streamlit Style Elements
+hide_st_style = """
+            <style>
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+            header {visibility: hidden;}
+            .stDeployButton {display:none;}
+            </style>
+            """
+st.markdown(hide_st_style, unsafe_allow_html=True)
+
 # Initialize Database
 # Always run init_db to ensure migrations are applied
 db_handler.init_db()

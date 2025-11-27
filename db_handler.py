@@ -63,6 +63,7 @@ def init_db():
             data TEXT NOT NULL,
             motorista_id INTEGER NOT NULL,
             veiculo_id INTEGER NOT NULL,
+            origem TEXT NOT NULL DEFAULT '',
             destino TEXT NOT NULL,
             hora_saida TEXT NOT NULL,
             distancia REAL DEFAULT 0,
@@ -105,6 +106,11 @@ def init_db():
 
     try:
         cursor.execute("ALTER TABLE multas ADD COLUMN viagem_id INTEGER REFERENCES viagens(id)")
+    except sqlite3.OperationalError:
+        pass # Column already exists
+
+    try:
+        cursor.execute("ALTER TABLE viagens ADD COLUMN origem TEXT DEFAULT ''")
     except sqlite3.OperationalError:
         pass # Column already exists
     
@@ -378,15 +384,15 @@ def get_fine_by_id(fine_id):
 
 # ============ TRAVEL FUNCTIONS ============
 
-def add_travel(data, motorista_id, veiculo_id, destino, hora_saida, distancia=0):
+def add_travel(data, motorista_id, veiculo_id, origem, destino, hora_saida, distancia=0):
     """Adds a new travel to the database and updates vehicle mileage."""
     conn = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute('''
-            INSERT INTO viagens (data, motorista_id, veiculo_id, destino, hora_saida, distancia)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (data, motorista_id, veiculo_id, destino, hora_saida, distancia))
+            INSERT INTO viagens (data, motorista_id, veiculo_id, origem, destino, hora_saida, distancia)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (data, motorista_id, veiculo_id, origem, destino, hora_saida, distancia))
         
         # Update vehicle mileage
         if distancia > 0:
@@ -411,6 +417,7 @@ def get_travels():
             v.id,
             v.data,
             v.hora_saida,
+            v.origem,
             v.destino,
             v.distancia,
             m.nome as motorista,
@@ -438,13 +445,14 @@ def get_travel_by_id(travel_id):
             'data': result[1],
             'motorista_id': result[2],
             'veiculo_id': result[3],
-            'destino': result[4],
-            'hora_saida': result[5],
-            'distancia': result[6] if len(result) > 6 else 0
+            'origem': result[4] if len(result) > 7 else '', # Handle migration
+            'destino': result[5] if len(result) > 7 else result[4], # Shift if old schema
+            'hora_saida': result[6] if len(result) > 7 else result[5],
+            'distancia': result[7] if len(result) > 7 else (result[6] if len(result) > 6 else 0)
         }
     return None
 
-def update_travel(travel_id, data, motorista_id, veiculo_id, destino, hora_saida, distancia):
+def update_travel(travel_id, data, motorista_id, veiculo_id, origem, destino, hora_saida, distancia):
     """Updates an existing travel's information and adjusts vehicle mileage."""
     conn = get_connection()
     cursor = conn.cursor()
@@ -466,9 +474,9 @@ def update_travel(travel_id, data, motorista_id, veiculo_id, destino, hora_saida
             
         cursor.execute('''
             UPDATE viagens 
-            SET data = ?, motorista_id = ?, veiculo_id = ?, destino = ?, hora_saida = ?, distancia = ?
+            SET data = ?, motorista_id = ?, veiculo_id = ?, origem = ?, destino = ?, hora_saida = ?, distancia = ?
             WHERE id = ?
-        ''', (data, motorista_id, veiculo_id, destino, hora_saida, distancia, travel_id))
+        ''', (data, motorista_id, veiculo_id, origem, destino, hora_saida, distancia, travel_id))
         
         # Add new mileage
         cursor.execute('''

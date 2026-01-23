@@ -75,6 +75,8 @@ def vehicles_page():
                 if placa and modelo and ano and renavam:
                     if db_handler.check_vehicle_exists(placa):
                          st.error("Veículo com esta placa já cadastrado!")
+                    elif db_handler.check_renavam_exists(renavam):
+                         st.error("Veículo com este Renavam já cadastrado!")
                     else:
                         success, message = db_handler.add_vehicle(placa, modelo, int(ano), renavam, km_atual)
                         if success:

@@ -140,6 +140,15 @@ def check_vehicle_exists(placa):
     conn.close()
     return count > 0
 
+def check_renavam_exists(renavam):
+    """Checks if a vehicle with the given Renavam already exists."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM veiculos WHERE renavam = ?", (renavam,))
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count > 0
+
 def add_driver(nome, cpf, cnh, validade_cnh):
     """Adds a new driver to the database."""
     conn = get_connection()

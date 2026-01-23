@@ -73,12 +73,15 @@ def vehicles_page():
             
             if submit_button:
                 if placa and modelo and ano and renavam:
-                    success, message = db_handler.add_vehicle(placa, modelo, int(ano), renavam, km_atual)
-                    if success:
-                        st.success(message)
-                        st.rerun()
+                    if db_handler.check_vehicle_exists(placa):
+                         st.error("Veículo com esta placa já cadastrado!")
                     else:
-                        st.error(message)
+                        success, message = db_handler.add_vehicle(placa, modelo, int(ano), renavam, km_atual)
+                        if success:
+                            st.success(message)
+                            st.rerun()
+                        else:
+                            st.error(message)
                 else:
                     st.warning("Preencha todos os campos obrigatórios.")
     

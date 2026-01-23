@@ -122,6 +122,24 @@ def init_db():
     conn.commit()
     conn.close()
 
+def check_driver_exists(cpf):
+    """Checks if a driver with the given CPF already exists."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM motoristas WHERE cpf = ?", (cpf,))
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count > 0
+
+def check_vehicle_exists(placa):
+    """Checks if a vehicle with the given license plate already exists."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM veiculos WHERE placa = ?", (placa,))
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count > 0
+
 def add_driver(nome, cpf, cnh, validade_cnh):
     """Adds a new driver to the database."""
     conn = get_connection()

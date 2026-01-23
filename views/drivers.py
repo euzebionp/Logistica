@@ -80,12 +80,15 @@ def drivers_page():
             
             if submit_button:
                 if nome and cpf and cnh and validade_cnh:
-                    success, message = db_handler.add_driver(nome, cpf, cnh, str(validade_cnh))
-                    if success:
-                        st.success(message)
-                        st.rerun()
+                    if db_handler.check_driver_exists(cpf):
+                        st.error("Motorista com este CPF já cadastrado!")
                     else:
-                        st.error(message)
+                        success, message = db_handler.add_driver(nome, cpf, cnh, str(validade_cnh))
+                        if success:
+                            st.success(message)
+                            st.rerun()
+                        else:
+                            st.error(message)
                 else:
                     st.warning("Preencha todos os campos obrigatórios.")
     

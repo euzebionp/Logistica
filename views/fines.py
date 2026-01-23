@@ -115,110 +115,128 @@ def fines_page():
         if fines_df.empty:
             st.info("Nenhuma multa cadastrada.")
         else:
-            # Print button
-            st.divider()
-            col_print, col_space = st.columns([1, 3])
-            with col_print:
-                if st.button("🖨️ Imprimir Lista de Multas", use_container_width=True):
-                    pdf_buffer = generate_fines_pdf(fines_df)
-                    st.download_button(
-                        label="📥 Baixar PDF",
-                        data=pdf_buffer,
-                        file_name="lista_multas.pdf",
-                        mime="application/pdf",
-                        use_container_width=True
-                    )
-            st.divider()
-            
-            st.subheader("Lista de Multas")
-            
-            for index, row in fines_df.iterrows():
-                # Format date for display
-                formatted_date = utils.format_date_br(row['data'])
+            # Search Bar
+            search_query = st.text_input("🔍 Localizar Multa", placeholder="Busque por Motorista, Veículo ou Placa...").strip().lower()
+            if search_query:
+                fines_df = fines_df[
+                    fines_df['motorista'].str.lower().str.contains(search_query) |
+                    fines_df['veiculo_placa'].str.lower().str.contains(search_query) |
+                    fines_df['veiculo_modelo'].str.lower().str.contains(search_query)
+                ]
+
+            if fines_df.empty:
+                st.info("Nenhuma multa encontrada para a busca.")
+            else:
+                # Print button
+                st.divider()
+                col_print, col_space = st.columns([1, 3])
+                with col_print:
+                    if st.button("🖨️ Imprimir Lista de Multas", use_container_width=True):
+                        pdf_buffer = generate_fines_pdf(fines_df)
+                        st.download_button(
+                            label="📥 Baixar PDF",
+                            data=pdf_buffer,
+                            file_name="lista_multas.pdf",
+                            mime="application/pdf",
+                            use_container_width=True
+                        )
+                st.divider()
                 
-                with st.expander(f"🚨 {row['tipo_infracao']} - {row['motorista']} - {formatted_date}"):
-                    col1, col2 = st.columns([3, 1])
+                st.subheader("Lista de Multas")
+                
+                for index, row in fines_df.iterrows():
+                    # Format date for display
+                    formatted_date = utils.format_date_br(row['data'])
                     
-                    with col1:
-                        st.write(f"**Data:** {formatted_date}")
-                        st.write(f"**Local:** {row['local']}")
-                        st.write(f"**Tipo:** {row['tipo_infracao']}")
-                        st.write(f"**Descrição:** {row['descricao']}")
-                        st.write(f"**Motorista:** {row['motorista']}")
-                        st.write(f"**Veículo:** {row['veiculo_modelo']} ({row['veiculo_placa']})")
-                        st.write(f"**Valor:** R$ {row['valor']:.2f}")
-                    
-                    with col2:
-                        # Edit button
-                        if st.button("✏️ Editar", key=f"edit_fine_{row['id']}"):
-                            st.session_state[f'editing_fine_{row["id"]}'] = True
-                            st.rerun()
+                    with st.expander(f"🚨 {row['tipo_infracao']} - {row['motorista']} - {formatted_date}"):
+                        col1, col2 = st.columns([3, 1])
                         
-                        # Delete button
-                        if st.button("🗑️ Excluir", key=f"delete_fine_{row['id']}"):
-                            success, message = db_handler.delete_fine(row['id'])
-                            if success:
-                                st.success(message)
+                        with col1:
+                            st.write(f"**Data:** {formatted_date}")
+                            st.write(f"**Local:** {row['local']}")
+                            st.write(f"**Tipo:** {row['tipo_infracao']}")
+                            st.write(f"**Descrição:** {row['descricao']}")
+                            st.write(f"**Motorista:** {row['motorista']}")
+                            st.write(f"**Veículo:** {row['veiculo_modelo']} ({row['veiculo_placa']})")
+                            st.write(f"**Valor:** R$ {row['valor']:.2f}")
+                        
+                        with col2:
+                            # Edit button
+                            if st.button("✏️ Editar", key=f"edit_fine_{row['id']}"):
+                                st.session_state[f'editing_fine_{row["id"]}'] = True
                                 st.rerun()
-                            else:
-                                st.error(message)
-                    
-                    # Edit form (shown when edit button is clicked)
-                    if st.session_state.get(f'editing_fine_{row["id"]}', False):
-                        st.divider()
-                        st.subheader("Editar Multa")
-                        
-                        # Get the full fine data
-                        fine_data = db_handler.get_fine_by_id(row['id'])
-                        
-                        # Rebuild driver and vehicle options
-                        driver_options_edit = {f"{r['nome']} (CPF: {r['cpf']})": r['id'] for i, r in drivers_df.iterrows()}
-                        vehicle_options_edit = {f"{r['modelo']} - {r['placa']}": r['id'] for i, r in vehicles_df.iterrows()}
-                        
-                        # Find current selections
-                        current_driver_label = [k for k, v in driver_options_edit.items() if v == fine_data['motorista_id']][0]
-                        current_vehicle_label = [k for k, v in vehicle_options_edit.items() if v == fine_data['veiculo_id']][0]
-                        
-                        with st.form(f"edit_form_{row['id']}"):
-                            # Parse date string
-                            try:
-                                date_obj = datetime.strptime(fine_data['data'], '%Y-%m-%d').date()
-                            except:
-                                date_obj = datetime.now().date()
                             
-                            edit_data = st.date_input("Data da Infração", value=date_obj)
-                            edit_local = st.text_input("Local", value=fine_data['local'])
-                            edit_tipo = st.selectbox("Tipo de Infração", ["Leve", "Média", "Grave", "Gravíssima"], 
-                                                     index=["Leve", "Média", "Grave", "Gravíssima"].index(fine_data['tipo_infracao']))
-                            edit_descricao = st.text_area("Descrição", value=fine_data['descricao'])
-                            edit_valor = st.number_input("Valor (R$)", min_value=0.0, step=0.01, value=float(fine_data['valor']))
-                            
-                            edit_driver = st.selectbox("Motorista", list(driver_options_edit.keys()), 
-                                                       index=list(driver_options_edit.keys()).index(current_driver_label))
-                            edit_vehicle = st.selectbox("Veículo", list(vehicle_options_edit.keys()), 
-                                                        index=list(vehicle_options_edit.keys()).index(current_vehicle_label))
-                            
-                            col_save, col_cancel = st.columns(2)
-                            with col_save:
-                                save_button = st.form_submit_button("💾 Salvar Alterações")
-                            with col_cancel:
-                                cancel_button = st.form_submit_button("❌ Cancelar")
-                            
-                            if save_button:
-                                motorista_id = driver_options_edit[edit_driver]
-                                veiculo_id = vehicle_options_edit[edit_vehicle]
-                                
-                                success, message = db_handler.update_fine(
-                                    row['id'], str(edit_data), edit_local, edit_tipo, edit_descricao, 
-                                    motorista_id, veiculo_id, edit_valor
-                                )
+                            # Delete button
+                            if st.button("🗑️ Excluir", key=f"delete_fine_{row['id']}"):
+                                success, message = db_handler.delete_fine(row['id'])
                                 if success:
                                     st.success(message)
-                                    del st.session_state[f'editing_fine_{row["id"]}']
                                     st.rerun()
                                 else:
                                     st.error(message)
+                        
+                        # Edit form (shown when edit button is clicked)
+                        if st.session_state.get(f'editing_fine_{row["id"]}', False):
+                            st.divider()
+                            st.subheader("Editar Multa")
                             
-                            if cancel_button:
-                                del st.session_state[f'editing_fine_{row["id"]}']
-                                st.rerun()
+                            # Get the full fine data
+                            fine_data = db_handler.get_fine_by_id(row['id'])
+                            
+                            # Rebuild driver and vehicle options
+                            driver_options_edit = {f"{r['nome']} (CPF: {r['cpf']})": r['id'] for i, r in drivers_df.iterrows()}
+                            vehicle_options_edit = {f"{r['modelo']} - {r['placa']}": r['id'] for i, r in vehicles_df.iterrows()}
+                            
+                            # Find current selections
+                            try:
+                                current_driver_label = [k for k, v in driver_options_edit.items() if v == fine_data['motorista_id']][0]
+                                current_vehicle_label = [k for k, v in vehicle_options_edit.items() if v == fine_data['veiculo_id']][0]
+                            except IndexError:
+                                # Handle case where driver/vehicle might be deleted or not found
+                                current_driver_label = list(driver_options_edit.keys())[0] if driver_options_edit else ""
+                                current_vehicle_label = list(vehicle_options_edit.keys())[0] if vehicle_options_edit else ""
+
+                            
+                            with st.form(f"edit_form_{row['id']}"):
+                                # Parse date string
+                                try:
+                                    date_obj = datetime.strptime(fine_data['data'], '%Y-%m-%d').date()
+                                except:
+                                    date_obj = datetime.now().date()
+                                
+                                edit_data = st.date_input("Data da Infração", value=date_obj)
+                                edit_local = st.text_input("Local", value=fine_data['local'])
+                                edit_tipo = st.selectbox("Tipo de Infração", ["Leve", "Média", "Grave", "Gravíssima"], 
+                                                         index=["Leve", "Média", "Grave", "Gravíssima"].index(fine_data['tipo_infracao']))
+                                edit_descricao = st.text_area("Descrição", value=fine_data['descricao'])
+                                edit_valor = st.number_input("Valor (R$)", min_value=0.0, step=0.01, value=float(fine_data['valor']))
+                                
+                                edit_driver = st.selectbox("Motorista", list(driver_options_edit.keys()), 
+                                                           index=list(driver_options_edit.keys()).index(current_driver_label) if current_driver_label in driver_options_edit else 0)
+                                edit_vehicle = st.selectbox("Veículo", list(vehicle_options_edit.keys()), 
+                                                            index=list(vehicle_options_edit.keys()).index(current_vehicle_label) if current_vehicle_label in vehicle_options_edit else 0)
+                                
+                                col_save, col_cancel = st.columns(2)
+                                with col_save:
+                                    save_button = st.form_submit_button("💾 Salvar Alterações")
+                                with col_cancel:
+                                    cancel_button = st.form_submit_button("❌ Cancelar")
+                                
+                                if save_button:
+                                    motorista_id = driver_options_edit[edit_driver]
+                                    veiculo_id = vehicle_options_edit[edit_vehicle]
+                                    
+                                    success, message = db_handler.update_fine(
+                                        row['id'], str(edit_data), edit_local, edit_tipo, edit_descricao, 
+                                        motorista_id, veiculo_id, edit_valor
+                                    )
+                                    if success:
+                                        st.success(message)
+                                        del st.session_state[f'editing_fine_{row["id"]}']
+                                        st.rerun()
+                                    else:
+                                        st.error(message)
+                                
+                                if cancel_button:
+                                    del st.session_state[f'editing_fine_{row["id"]}']
+                                    st.rerun()

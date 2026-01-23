@@ -170,6 +170,9 @@ def travels_page():
         # Manage Travels
         travels_df = db_handler.get_travels()
         
+        # Search Bar
+        search_query = st.text_input("🔍 Localizar Viagem", placeholder="Busque por Motorista, Veículo ou Destino...").strip().lower()
+
         # Filters
         st.subheader("Filtros e Pesquisa")
         col_filter1, col_filter2 = st.columns(2)
@@ -193,6 +196,15 @@ def travels_page():
 
         # Apply Filters
         if not travels_df.empty:
+            # Search Filter
+            if search_query:
+                travels_df = travels_df[
+                    travels_df['motorista'].str.lower().str.contains(search_query) |
+                    travels_df['veiculo_placa'].str.lower().str.contains(search_query) |
+                    travels_df['veiculo_modelo'].str.lower().str.contains(search_query) |
+                    travels_df['destino'].str.lower().str.contains(search_query)
+                ]
+
             # Date Filter
             if isinstance(date_range, tuple) and len(date_range) == 2:
                 start_date, end_date = date_range

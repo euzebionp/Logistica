@@ -164,36 +164,49 @@ def maintenance_page():
         if maintenance_df.empty:
             st.info("Nenhuma manutenção registrada.")
         else:
-            # Print button
-            col_print, col_space = st.columns([1, 3])
-            with col_print:
-                if st.button("🖨️ Imprimir Relatório", use_container_width=True):
-                    pdf_buffer = generate_maintenance_pdf(maintenance_df)
-                    st.download_button(
-                        label="📥 Baixar PDF",
-                        data=pdf_buffer,
-                        file_name="relatorio_manutencao.pdf",
-                        mime="application/pdf",
-                        use_container_width=True
-                    )
-            
-            for index, row in maintenance_df.iterrows():
-                formatted_date = utils.format_date_br(row['data'])
-                with st.expander(f"🔧 {formatted_date} - {row['veiculo_modelo']} - {row['tipo_servico']}"):
-                    col1, col2 = st.columns([3, 1])
-                    with col1:
-                        st.write(f"**Veículo:** {row['veiculo_placa']} - {row['veiculo_modelo']}")
-                        st.write(f"**Serviço:** {row['tipo_servico']}")
-                        st.write(f"**Km Realizado:** {row['km_realizado']:.0f} km")
-                        st.write(f"**Valor:** R$ {row['valor']:.2f}")
-                        st.write(f"**Próxima Revisão:** {row['proximo_servico_km']:.0f} km")
-                        st.write(f"**Descrição:** {row['descricao']}")
-                    
-                    with col2:
-                        if st.button("🗑️ Excluir", key=f"del_maint_{row['id']}"):
-                            success, msg = db_handler.delete_maintenance(row['id'])
-                            if success:
-                                st.success(msg)
-                                st.rerun()
-                            else:
-                                st.error(msg)
+            # Search Bar
+            search_query = st.text_input("🔍 Localizar Manutenção", placeholder="Busque por Veículo, Placa ou Serviço...").strip().lower()
+            if search_query:
+                maintenance_df = maintenance_df[
+                    maintenance_df['veiculo_placa'].str.lower().str.contains(search_query) |
+                    maintenance_df['veiculo_modelo'].str.lower().str.contains(search_query) |
+                    maintenance_df['tipo_servico'].str.lower().str.contains(search_query)
+                ]
+
+            if maintenance_df.empty:
+                st.info("Nenhuma manutenção encontrada para a busca.")
+            else:
+                # Print button
+                col_print, col_space = st.columns([1, 3])
+                with col_print:
+                    if st.button("🖨️ Imprimir Relatório", use_container_width=True):
+                        pdf_buffer = generate_maintenance_pdf(maintenance_df)
+                        st.download_button(
+                            label="📥 Baixar PDF",
+                            data=pdf_buffer,
+                            file_name="relatorio_manutencao.pdf",
+                            mime="application/pdf",
+                            use_container_width=True
+                        )
+                
+                for index, row in maintenance_df.iterrows():
+                    formatted_date = utils.format_date_br(row['data'])
+                    window_title = f"🔧 {formatted_date} - {row['veiculo_modelo']} - {row['tipo_servico']}"
+                    with st.expander(window_title):
+                        col1, col2 = st.columns([3, 1])
+                        with col1:
+                            st.write(f"**Veículo:** {row['veiculo_placa']} - {row['veiculo_modelo']}")
+                            st.write(f"**Serviço:** {row['tipo_servico']}")
+                            st.write(f"**Km Realizado:** {row['km_realizado']:.0f} km")
+                            st.write(f"**Valor:** R$ {row['valor']:.2f}")
+                            st.write(f"**Próxima Revisão:** {row['proximo_servico_km']:.0f} km")
+                            st.write(f"**Descrição:** {row['descricao']}")
+                        
+                        with col2:
+                            if st.button("🗑️ Excluir", key=f"del_maint_{row['id']}"):
+                                success, msg = db_handler.delete_maintenance(row['id'])
+                                if success:
+                                    st.success(msg)
+                                    st.rerun()
+                                else:
+                                    st.error(msg)

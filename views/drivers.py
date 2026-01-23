@@ -99,110 +99,121 @@ def drivers_page():
         if drivers_df.empty:
             st.info("Nenhum motorista cadastrado.")
         else:
-            # Show expired CNH alert at the top
-            expired_drivers = []
-            for index, row in drivers_df.iterrows():
-                if utils.is_cnh_expired(row['validade_cnh']):
-                    expired_drivers.append(row['nome'])
+            # Search Bar
+            search_query = st.text_input("🔍 Localizar Motorista", placeholder="Busque por Nome ou CPF...").strip().lower()
+            if search_query:
+                drivers_df = drivers_df[
+                    drivers_df['nome'].str.lower().str.contains(search_query) |
+                    drivers_df['cpf'].str.contains(search_query)
+                ]
             
-            if expired_drivers:
-                st.error(f"⚠️ **ALERTA:** {len(expired_drivers)} motorista(s) com CNH vencida: {', '.join(expired_drivers)}")
-            
-            # Print button
-            st.divider()
-            col_print, col_space = st.columns([1, 3])
-            with col_print:
-                if st.button("🖨️ Imprimir Lista de Motoristas", use_container_width=True):
-                    pdf_buffer = generate_drivers_pdf(drivers_df)
-                    st.download_button(
-                        label="📥 Baixar PDF",
-                        data=pdf_buffer,
-                        file_name="lista_motoristas.pdf",
-                        mime="application/pdf",
-                        use_container_width=True
-                    )
-            st.divider()
-            
-            st.subheader("Lista de Motoristas")
-            
-            for index, row in drivers_df.iterrows():
-                # Get CNH status
-                status_text, status_color, icon = utils.get_cnh_status(row['validade_cnh'])
+            if drivers_df.empty:
+                st.info("Nenhum motorista encontrado para a busca.")
+            else:
+                # Show expired CNH alert at the top
+                expired_drivers = []
+                for index, row in drivers_df.iterrows():
+                    if utils.is_cnh_expired(row['validade_cnh']):
+                        expired_drivers.append(row['nome'])
                 
-                # Title with status indicator
-                title = f"{icon} {row['nome']} - CPF: {row['cpf']}"
-                if status_text == "VENCIDA":
-                    title += " ⚠️ CNH VENCIDA"
+                if expired_drivers:
+                    st.error(f"⚠️ **ALERTA:** {len(expired_drivers)} motorista(s) com CNH vencida: {', '.join(expired_drivers)}")
                 
-                with st.expander(title):
-                    col1, col2 = st.columns([3, 1])
+                # Print button
+                st.divider()
+                col_print, col_space = st.columns([1, 3])
+                with col_print:
+                    if st.button("🖨️ Imprimir Lista de Motoristas", use_container_width=True):
+                        pdf_buffer = generate_drivers_pdf(drivers_df)
+                        st.download_button(
+                            label="📥 Baixar PDF",
+                            data=pdf_buffer,
+                            file_name="lista_motoristas.pdf",
+                            mime="application/pdf",
+                            use_container_width=True
+                        )
+                st.divider()
+                
+                st.subheader("Lista de Motoristas")
+                
+                for index, row in drivers_df.iterrows():
+                    # Get CNH status
+                    status_text, status_color, icon = utils.get_cnh_status(row['validade_cnh'])
                     
-                    with col1:
-                        st.write(f"**Nome:** {row['nome']}")
-                        st.write(f"**CPF:** {row['cpf']}")
-                        st.write(f"**CNH:** {row['cnh']}")
-                        
-                        # Display formatted date with status
-                        formatted_date = utils.format_date_br(row['validade_cnh'])
-                        if status_text == "VENCIDA":
-                            st.markdown(f"**Validade CNH:** :red[{formatted_date}] 🔴 **{status_text}**")
-                        elif "Vence em" in status_text and utils.days_until_expiration(row['validade_cnh']) <= 30:
-                            st.markdown(f"**Validade CNH:** :orange[{formatted_date}] ⚠️ **{status_text}**")
-                        elif "Vence em" in status_text and utils.days_until_expiration(row['validade_cnh']) <= 90:
-                            st.markdown(f"**Validade CNH:** :yellow[{formatted_date}] ⚡ **{status_text}**")
-                        else:
-                            st.markdown(f"**Validade CNH:** :green[{formatted_date}] ✅ **{status_text}**")
+                    # Title with status indicator
+                    title = f"{icon} {row['nome']} - CPF: {row['cpf']}"
+                    if status_text == "VENCIDA":
+                        title += " ⚠️ CNH VENCIDA"
                     
-                    with col2:
-                        # Edit button
-                        if st.button("✏️ Editar", key=f"edit_driver_{row['id']}"):
-                            st.session_state[f'editing_driver_{row["id"]}'] = True
-                            st.rerun()
+                    with st.expander(title):
+                        col1, col2 = st.columns([3, 1])
                         
-                        # Delete button
-                        if st.button("🗑️ Excluir", key=f"delete_driver_{row['id']}"):
-                            success, message = db_handler.delete_driver(row['id'])
-                            if success:
-                                st.success(message)
-                                st.rerun()
+                        with col1:
+                            st.write(f"**Nome:** {row['nome']}")
+                            st.write(f"**CPF:** {row['cpf']}")
+                            st.write(f"**CNH:** {row['cnh']}")
+                            
+                            # Display formatted date with status
+                            formatted_date = utils.format_date_br(row['validade_cnh'])
+                            if status_text == "VENCIDA":
+                                st.markdown(f"**Validade CNH:** :red[{formatted_date}] 🔴 **{status_text}**")
+                            elif "Vence em" in status_text and utils.days_until_expiration(row['validade_cnh']) <= 30:
+                                st.markdown(f"**Validade CNH:** :orange[{formatted_date}] ⚠️ **{status_text}**")
+                            elif "Vence em" in status_text and utils.days_until_expiration(row['validade_cnh']) <= 90:
+                                st.markdown(f"**Validade CNH:** :yellow[{formatted_date}] ⚡ **{status_text}**")
                             else:
-                                st.error(message)
-                    
-                    # Edit form (shown when edit button is clicked)
-                    if st.session_state.get(f'editing_driver_{row["id"]}', False):
-                        st.divider()
-                        st.subheader("Editar Motorista")
+                                st.markdown(f"**Validade CNH:** :green[{formatted_date}] ✅ **{status_text}**")
                         
-                        with st.form(f"edit_form_{row['id']}"):
-                            edit_nome = st.text_input("Nome Completo", value=row['nome'])
-                            edit_cpf = st.text_input("CPF", value=row['cpf'])
-                            edit_cnh = st.text_input("CNH", value=row['cnh'])
+                        with col2:
+                            # Edit button
+                            if st.button("✏️ Editar", key=f"edit_driver_{row['id']}"):
+                                st.session_state[f'editing_driver_{row["id"]}'] = True
+                                st.rerun()
                             
-                            # Parse date string
-                            try:
-                                date_obj = datetime.strptime(row['validade_cnh'], '%Y-%m-%d').date()
-                            except:
-                                date_obj = datetime.now().date()
-                            
-                            edit_validade = st.date_input("Validade da CNH", value=date_obj)
-                            
-                            col_save, col_cancel = st.columns(2)
-                            with col_save:
-                                save_button = st.form_submit_button("💾 Salvar Alterações")
-                            with col_cancel:
-                                cancel_button = st.form_submit_button("❌ Cancelar")
-                            
-                            if save_button:
-                                success, message = db_handler.update_driver(
-                                    row['id'], edit_nome, edit_cpf, edit_cnh, str(edit_validade)
-                                )
+                            # Delete button
+                            if st.button("🗑️ Excluir", key=f"delete_driver_{row['id']}"):
+                                success, message = db_handler.delete_driver(row['id'])
                                 if success:
                                     st.success(message)
-                                    del st.session_state[f'editing_driver_{row["id"]}']
                                     st.rerun()
                                 else:
                                     st.error(message)
+                        
+                        # Edit form (shown when edit button is clicked)
+                        if st.session_state.get(f'editing_driver_{row["id"]}', False):
+                            st.divider()
+                            st.subheader("Editar Motorista")
                             
-                            if cancel_button:
-                                del st.session_state[f'editing_driver_{row["id"]}']
-                                st.rerun()
+                            with st.form(f"edit_form_{row['id']}"):
+                                edit_nome = st.text_input("Nome Completo", value=row['nome'])
+                                edit_cpf = st.text_input("CPF", value=row['cpf'])
+                                edit_cnh = st.text_input("CNH", value=row['cnh'])
+                                
+                                # Parse date string
+                                try:
+                                    date_obj = datetime.strptime(row['validade_cnh'], '%Y-%m-%d').date()
+                                except:
+                                    date_obj = datetime.now().date()
+                                
+                                edit_validade = st.date_input("Validade da CNH", value=date_obj)
+                                
+                                col_save, col_cancel = st.columns(2)
+                                with col_save:
+                                    save_button = st.form_submit_button("💾 Salvar Alterações")
+                                with col_cancel:
+                                    cancel_button = st.form_submit_button("❌ Cancelar")
+                                
+                                if save_button:
+                                    success, message = db_handler.update_driver(
+                                        row['id'], edit_nome, edit_cpf, edit_cnh, str(edit_validade)
+                                    )
+                                    if success:
+                                        st.success(message)
+                                        del st.session_state[f'editing_driver_{row["id"]}']
+                                        st.rerun()
+                                    else:
+                                        st.error(message)
+                                
+                                if cancel_button:
+                                    del st.session_state[f'editing_driver_{row["id"]}']
+                                    st.rerun()

@@ -78,7 +78,7 @@ def maintenance_page():
                 st.write(f"**{row['modelo']} ({row['placa']})** - Km Atual: {row['km_atual']:.0f} - Próx. Serviço: {row['proximo_servico_km']:.0f} - **{status_msg}**")
 
     # Tabs
-    tab1, tab2 = st.tabs(["Registrar Manutenção", "Histórico de Manutenções"])
+    tab1, tab2, tab3 = st.tabs(["Registrar Manutenção", "Histórico de Manutenções", "Relatório de Veículos"])
     
     with tab1:
         st.subheader("Nova Manutenção")
@@ -210,3 +210,239 @@ def maintenance_page():
                                     st.rerun()
                                 else:
                                     st.error(msg)
+    
+    with tab3:
+        st.subheader("Relatório de Veículos e Atualização em Lote")
+        
+        vehicles_df = db_handler.get_vehicles()
+        
+        if vehicles_df.empty:
+            st.warning("Nenhum veículo cadastrado.")
+        else:
+            # Get maintenance info for each vehicle
+            maintenance_info = []
+            for _, vehicle in vehicles_df.iterrows():
+                # Get latest maintenance
+                conn = db_handler.get_connection()
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT proximo_servico_km, proximo_servico_data, tipo_servico, data
+                    FROM manutencoes 
+                    WHERE veiculo_id = ?
+                    ORDER BY data DESC
+                    LIMIT 1
+                ''', (vehicle['id'],))
+                result = cursor.fetchone()
+                conn.close()
+                
+                if result:
+                    maintenance_info.append({
+                        'id': vehicle['id'],
+                        'placa': vehicle['placa'],
+                        'modelo': vehicle['modelo'],
+                        'ano': vehicle['ano'],
+                        'km_atual': vehicle['km_atual'],
+                        'proximo_servico_km': result[0] if result[0] else '',
+                        'proximo_servico_data': result[1] if result[1] else '',
+                        'ultimo_servico': result[2] if result[2] else '',
+                        'data_ultimo_servico': result[3] if result[3] else ''
+                    })
+                else:
+                    maintenance_info.append({
+                        'id': vehicle['id'],
+                        'placa': vehicle['placa'],
+                        'modelo': vehicle['modelo'],
+                        'ano': vehicle['ano'],
+                        'km_atual': vehicle['km_atual'],
+                        'proximo_servico_km': '',
+                        'proximo_servico_data': '',
+                        'ultimo_servico': 'Sem registro',
+                        'data_ultimo_servico': ''
+                    })
+            
+            report_df = pd.DataFrame(maintenance_info)
+            
+            # Display summary
+            st.markdown("### 📊 Resumo")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total de Veículos", len(report_df))
+            with col2:
+                vehicles_with_maintenance = len(report_df[report_df['proximo_servico_km'] != ''])
+                st.metric("Com Manutenção Programada", vehicles_with_maintenance)
+            with col3:
+                vehicles_without_maintenance = len(report_df[report_df['proximo_servico_km'] == ''])
+                st.metric("Sem Manutenção Programada", vehicles_without_maintenance)
+            
+            st.markdown("---")
+            
+            # Export/Import section
+            col_export, col_import = st.columns(2)
+            
+            with col_export:
+                st.markdown("### 📤 Exportar Modelo CSV")
+                st.write("Baixe o arquivo CSV com os dados atuais dos veículos para edição:")
+                
+                # Prepare CSV for export
+                export_df = report_df[['placa', 'modelo', 'ano', 'km_atual', 'proximo_servico_km', 'proximo_servico_data']].copy()
+                export_df.columns = ['Placa', 'Modelo', 'Ano', 'KM_Atual', 'Proximo_Servico_KM', 'Proximo_Servico_Data']
+                
+                csv_buffer = io.StringIO()
+                export_df.to_csv(csv_buffer, index=False, encoding='utf-8-sig')
+                csv_data = csv_buffer.getvalue()
+                
+                st.download_button(
+                    label="📥 Baixar CSV Modelo",
+                    data=csv_data,
+                    file_name=f"veiculos_manutencao_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+                
+                st.info("""
+                **Instruções:**
+                1. Baixe o arquivo CSV
+                2. Edite as colunas `KM_Atual`, `Proximo_Servico_KM` e `Proximo_Servico_Data`
+                3. Salve o arquivo
+                4. Importe de volta usando o botão ao lado
+                """)
+            
+            with col_import:
+                st.markdown("### 📥 Importar CSV Atualizado")
+                st.write("Faça upload do CSV editado para atualizar os dados:")
+                
+                uploaded_file = st.file_uploader(
+                    "Selecione o arquivo CSV",
+                    type=['csv'],
+                    help="Arquivo CSV com as colunas: Placa, Modelo, Ano, KM_Atual, Proximo_Servico_KM, Proximo_Servico_Data"
+                )
+                
+                if uploaded_file is not None:
+                    try:
+                        import_df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
+                        
+                        # Validate columns
+                        required_cols = ['Placa', 'KM_Atual']
+                        missing_cols = [col for col in required_cols if col not in import_df.columns]
+                        
+                        if missing_cols:
+                            st.error(f"❌ Colunas obrigatórias faltando: {', '.join(missing_cols)}")
+                        else:
+                            st.success(f"✅ Arquivo carregado com {len(import_df)} registros")
+                            
+                            # Preview
+                            with st.expander("👁️ Visualizar Dados Importados"):
+                                st.dataframe(import_df, use_container_width=True)
+                            
+                            if st.button("🔄 Processar Atualização", type="primary", use_container_width=True):
+                                success_count = 0
+                                error_count = 0
+                                errors = []
+                                
+                                progress_bar = st.progress(0)
+                                status_text = st.empty()
+                                
+                                for idx, row in import_df.iterrows():
+                                    try:
+                                        placa = str(row['Placa']).strip().upper()
+                                        
+                                        # Find vehicle by plate
+                                        vehicle = vehicles_df[vehicles_df['placa'].str.upper() == placa]
+                                        
+                                        if vehicle.empty:
+                                            errors.append(f"Placa {placa} não encontrada")
+                                            error_count += 1
+                                            continue
+                                        
+                                        vehicle_id = vehicle.iloc[0]['id']
+                                        vehicle_data = db_handler.get_vehicle_by_id(vehicle_id)
+                                        
+                                        # Update km_atual
+                                        new_km = float(row['KM_Atual']) if pd.notna(row['KM_Atual']) else vehicle_data['km_atual']
+                                        
+                                        # Update vehicle
+                                        success, msg = db_handler.update_vehicle(
+                                            vehicle_id,
+                                            vehicle_data['placa'],
+                                            vehicle_data['modelo'],
+                                            vehicle_data['ano'],
+                                            vehicle_data['renavam'],
+                                            new_km
+                                        )
+                                        
+                                        if success:
+                                            # Check if there's maintenance scheduling info
+                                            if 'Proximo_Servico_KM' in import_df.columns and pd.notna(row['Proximo_Servico_KM']):
+                                                proximo_km = float(row['Proximo_Servico_KM'])
+                                                proximo_data = str(row['Proximo_Servico_Data']) if 'Proximo_Servico_Data' in import_df.columns and pd.notna(row['Proximo_Servico_Data']) else str(datetime.now().date())
+                                                
+                                                # Add maintenance record for scheduling
+                                                db_handler.add_maintenance(
+                                                    vehicle_id,
+                                                    str(datetime.now().date()),
+                                                    "Atualização via CSV",
+                                                    f"Atualização em lote - KM: {new_km}",
+                                                    new_km,
+                                                    proximo_km,
+                                                    proximo_data,
+                                                    0.0
+                                                )
+                                            
+                                            success_count += 1
+                                        else:
+                                            errors.append(f"Placa {placa}: {msg}")
+                                            error_count += 1
+                                        
+                                    except Exception as e:
+                                        errors.append(f"Linha {idx + 2}: {str(e)}")
+                                        error_count += 1
+                                    
+                                    # Update progress
+                                    progress = (idx + 1) / len(import_df)
+                                    progress_bar.progress(progress)
+                                    status_text.text(f"Processando... {idx + 1}/{len(import_df)}")
+                                
+                                progress_bar.empty()
+                                status_text.empty()
+                                
+                                # Show results
+                                st.markdown("---")
+                                st.markdown("### 📊 Resultado da Importação")
+                                
+                                col_success, col_error = st.columns(2)
+                                with col_success:
+                                    st.success(f"✅ **{success_count}** registros atualizados com sucesso")
+                                with col_error:
+                                    if error_count > 0:
+                                        st.error(f"❌ **{error_count}** erros encontrados")
+                                
+                                if errors:
+                                    with st.expander("⚠️ Ver Erros"):
+                                        for error in errors:
+                                            st.write(f"• {error}")
+                                
+                                if success_count > 0:
+                                    st.balloons()
+                                    st.info("🔄 Recarregue a página para ver as atualizações")
+                    
+                    except Exception as e:
+                        st.error(f"❌ Erro ao processar arquivo: {str(e)}")
+            
+            st.markdown("---")
+            
+            # Display vehicles table
+            st.markdown("### 📋 Lista de Veículos")
+            
+            # Format display dataframe
+            display_df = report_df.copy()
+            display_df['km_atual'] = display_df['km_atual'].apply(lambda x: f"{x:,.0f} km" if pd.notna(x) else "0 km")
+            display_df['proximo_servico_km'] = display_df['proximo_servico_km'].apply(lambda x: f"{x:,.0f} km" if x != '' and pd.notna(x) else "Não programado")
+            display_df['data_ultimo_servico'] = display_df['data_ultimo_servico'].apply(lambda x: utils.format_date_br(x) if x != '' else "N/A")
+            display_df['proximo_servico_data'] = display_df['proximo_servico_data'].apply(lambda x: utils.format_date_br(x) if x != '' else "N/A")
+            
+            # Rename columns for display
+            display_df = display_df[['placa', 'modelo', 'ano', 'km_atual', 'ultimo_servico', 'data_ultimo_servico', 'proximo_servico_km', 'proximo_servico_data']]
+            display_df.columns = ['Placa', 'Modelo', 'Ano', 'KM Atual', 'Último Serviço', 'Data Último Serviço', 'Próximo Serviço (KM)', 'Data Próximo Serviço']
+            
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+

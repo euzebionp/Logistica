@@ -2,7 +2,9 @@ import sqlite3
 import pandas as pd
 import os
 
-DB_NAME = "traffic_app.db"
+# Get the directory where this script is located
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_NAME = os.path.join(SCRIPT_DIR, "traffic_app.db")
 
 def get_connection():
     """Establishes a connection to the SQLite database."""

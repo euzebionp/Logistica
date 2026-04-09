@@ -40,8 +40,7 @@ def _find_col(df_cols, candidates):
     for c in candidates:
         if c in df_cols:
             return c
-    # Case-insensitive fallback
-    df_lower = {c.lower(): c for c in df_cols}
+    df_lower = {col.lower(): col for col in df_cols}
     for c in candidates:
         if c.lower() in df_lower:
             return df_lower[c.lower()]
@@ -62,32 +61,25 @@ def _normalize_combustivel(val):
     if not val:
         return 'diesel_s10'
     v = str(val).strip().lower()
-    if 's10' in v:
-        return 'diesel_s10'
-    if 's500' in v or 's 500' in v:
-        return 'diesel_s500'
-    if 'diesel' in v:
-        return 'diesel_s10'
-    if 'gasolina' in v or 'gasol' in v:
-        return 'gasolina'
-    if 'etanol' in v or 'alcool' in v or 'álcool' in v:
-        return 'etanol'
-    if 'gnv' in v or 'gas natural' in v:
-        return 'gnv'
+    if 's10' in v:      return 'diesel_s10'
+    if 's500' in v:     return 'diesel_s500'
+    if 'diesel' in v:   return 'diesel_s10'
+    if 'gasolina' in v: return 'gasolina'
+    if 'etanol' in v or 'alcool' in v or 'álcool' in v: return 'etanol'
+    if 'gnv' in v:      return 'gnv'
     return 'flex'
 
 
 def _sync_frota_number(veiculo_id, frota_raw, vehicles_df):
     """Atualiza o número de frota do veículo se ele ainda não tiver um."""
-    if not frota_raw or frota_raw in ('nan', ''):
+    if not frota_raw or str(frota_raw) in ('nan', ''):
         return False
     v_row = vehicles_df[vehicles_df['id'] == veiculo_id]
     if v_row.empty:
         return False
     row = v_row.iloc[0]
     current_frota = str(row.get('numero_frota', '') or '')
-    if current_frota == '' or current_frota == 'nan':
-        # Update via db
+    if current_frota in ('', 'nan'):
         db_handler.update_vehicle(
             veiculo_id,
             row['placa'], row['modelo'], int(row['ano']),
@@ -100,6 +92,99 @@ def _sync_frota_number(veiculo_id, frota_raw, vehicles_df):
     return False
 
 
+def _build_rows(raw_df, col_map_found, vehicles_df, lote):
+    """Parse all rows from the raw dataframe into normalized records."""
+    rows = []
+    for _, r in raw_df.iterrows():
+        identificacao = str(
+            r.get(col_map_found.get('identificacao', ''), '') or ''
+        ).strip()
+        if not identificacao or identificacao.lower() in ('nan', ''):
+            continue
+
+        frota_raw = str(
+            r.get(col_map_found.get('numero_frota', ''), '') or ''
+        ).strip()
+        if frota_raw.endswith('.0'):
+            frota_raw = frota_raw[:-2]
+
+        data_raw = str(r.get(col_map_found.get('data', ''),            '') or '').strip()
+        comb_raw = str(r.get(col_map_found.get('tipo_combustivel', ''), '') or '').strip()
+        litros   = _parse_number(r.get(col_map_found.get('volume_litros', ''), 0))
+        preco    = _parse_number(r.get(col_map_found.get('preco_litro',   ''), 0))
+        total    = _parse_number(r.get(col_map_found.get('valor_total',   ''), 0))
+        km_ant   = _parse_number(r.get(col_map_found.get('km_anterior',   ''), 0)) or 0
+        km_now   = _parse_number(r.get(col_map_found.get('km_atual',      ''), 0))
+
+        if km_now is None or litros is None or litros <= 0:
+            continue
+
+        comb_norm  = _normalize_combustivel(comb_raw)
+        km_rod     = (km_now - km_ant) if km_ant and km_ant > 0 else None
+        rendimento = (
+            round(km_rod / litros, 2)
+            if km_rod and km_rod > 0 and litros > 0 else None
+        )
+
+        veiculo_id = db_handler.get_vehicle_by_placa_or_frota(identificacao, frota_raw)
+
+        match_method = '—'
+        placa_display  = identificacao
+        modelo_display = '—'
+        frota_display  = frota_raw or '—'
+        tem_frota_db   = False
+
+        if veiculo_id:
+            v_row = vehicles_df[vehicles_df['id'] == veiculo_id]
+            if not v_row.empty:
+                placa_display  = v_row.iloc[0]['placa']
+                modelo_display = v_row.iloc[0]['modelo']
+                match_method = (
+                    '🔵 Placa'
+                    if v_row.iloc[0]['placa'].upper() == identificacao.upper()
+                    else '🟣 Frota'
+                )
+                frota_db = str(v_row.iloc[0].get('numero_frota', '') or '')
+                tem_frota_db = frota_db not in ('', 'nan')
+                if not tem_frota_db and frota_raw:
+                    frota_display = f"{frota_raw} 🆕"
+
+        alertas = []
+        if km_ant > 0 and km_now < km_ant:
+            alertas.append("⚠️ KM atual < KM anterior")
+        if km_rod and km_rod > 2000:
+            alertas.append("⚠️ KM rodados alto")
+        if rendimento and rendimento < 2:
+            alertas.append("⚠️ Rendimento suspeito")
+        if not veiculo_id:
+            alertas.append("❓ Veículo não cadastrado")
+
+        rows.append({
+            'identificacao':     identificacao,
+            'frota':             frota_raw,
+            'veiculo_id':        veiculo_id,
+            'data':              data_raw,
+            'comb_norm':         comb_norm,
+            'litros':            litros,
+            'preco':             preco or 0,
+            'total':             total or round(litros * (preco or 0), 2),
+            'km_anterior':       km_ant,
+            'km_atual':          km_now,
+            'km_rodados':        km_rod,
+            'rendimento':        rendimento,
+            'lote':              lote,
+            'sincronizar_frota': bool(veiculo_id and frota_raw and not tem_frota_db),
+            'placa':             placa_display,
+            'modelo':            modelo_display,
+            'frota_display':     frota_display,
+            'combustivel':       comb_raw,
+            'match':             match_method if veiculo_id else '❓ Não encontrado',
+            'alertas':           ' | '.join(alertas) if alertas else '✅ OK',
+        })
+    return rows
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 def fuel_analysis_page():
     st.header("⛽ Combustível e Rendimento")
 
@@ -109,22 +194,24 @@ def fuel_analysis_page():
         "🏭 Painel da Frota",
     ])
 
-    # ─── TAB 1 • Importar ────────────────────────────────────────────────────
+    # ═══════════════════════════════════════════════════════════════════════
+    # TAB 1 — Importar
+    # ═══════════════════════════════════════════════════════════════════════
     with tab1:
         st.subheader("Importar Planilha de Abastecimento")
 
         col_info, col_modelo = st.columns([2, 1])
         with col_info:
             st.info("""
-**Formato esperado da planilha do setor:**
+**Formato esperado (gerado pelo sistema de abastecimento):**
 
 | Data | Identificação | Frota | Combustível | Qt. Litros | Preco | Total | Km Anterior | Km Atual |
 |---|---|---|---|---|---|---|---|---|
 | 19/03/2026 00:06 | UAB2G88 | 67 | DIESEL S10 | 119,96 | 5,779 | 693,25 | 1115 | 11316 |
 
-**Aceita:** `.CSV` e `.XLSX` / `.XLS`  
-**Identificação:** o sistema busca o veículo por **Placa** e, se não achar, por **Número de Frota**.  
-Ao importar, o **Nº de Frota é automaticamente vinculado** ao cadastro do veículo.
+**Aceita:** `.CSV` e `.XLSX`  
+**Busca:** por **Placa** e, se não achar, por **Nº de Frota**.  
+O **Nº de Frota é vinculado automaticamente** ao cadastro do veículo.
 """)
         with col_modelo:
             tpl = pd.DataFrame({
@@ -145,7 +232,6 @@ Ao importar, o **Nº de Frota é automaticamente vinculado** ao cadastro do veí
                 data=buf.getvalue(),
                 file_name="modelo_abastecimento.csv",
                 mime="text/csv",
-                use_container_width=True
             )
 
         st.divider()
@@ -156,548 +242,502 @@ Ao importar, o **Nº de Frota é automaticamente vinculado** ao cadastro do veí
             help="Arquivos gerados pelo sistema de abastecimento"
         )
 
-        if not uploaded:
-            st.stop()
-
-        try:
-            # ── Leitura do arquivo ─────────────────────────────────────────
-            if uploaded.name.endswith(('.xlsx', '.xls')):
-                raw_df = pd.read_excel(uploaded, dtype=str)
-            else:
-                content = uploaded.read()
-                raw_df = None
-                for sep in [';', ',', '\t']:
-                    try:
-                        tmp = pd.read_csv(io.BytesIO(content), sep=sep,
-                                          dtype=str, encoding='utf-8-sig')
-                        if len(tmp.columns) > 3:
-                            raw_df = tmp
-                            break
-                    except Exception:
-                        continue
-                if raw_df is None:
-                    st.error("Não foi possível ler o arquivo. Verifique o separador (;  ou  ,).")
-                    st.stop()
-
-            st.success(
-                f"✅ Arquivo lido: **{len(raw_df)} linhas** | "
-                f"Colunas detectadas: `{', '.join(raw_df.columns.tolist())}`"
-            )
-
-            # ── Mapeamento de colunas ──────────────────────────────────────
-            col_map_found = {
-                field: _find_col(raw_df.columns.tolist(), candidates)
-                for field, candidates in COL_MAP.items()
-            }
-
-            missing = [
-                f for f, c in col_map_found.items()
-                if c is None and f in ('identificacao', 'numero_frota',
-                                       'km_atual', 'volume_litros')
-            ]
-            if missing:
-                st.error(f"❌ Colunas obrigatórias não encontradas: `{missing}`")
-                st.write("Colunas presentes no arquivo:", raw_df.columns.tolist())
-                st.stop()
-
-            # ── Normalização linha a linha ─────────────────────────────────
-            vehicles_df = db_handler.get_vehicles()
-            lote = f"lote_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            rows = []
-
-            for _, r in raw_df.iterrows():
-                identificacao = str(
-                    r.get(col_map_found['identificacao'], '') or ''
-                ).strip()
-                if not identificacao or identificacao.lower() in ('nan', ''):
-                    continue
-
-                frota_raw = str(
-                    r.get(col_map_found['numero_frota'], '') or ''
-                ).strip()
-                # Remove ".0" suffix that Excel adds to integers
-                if frota_raw.endswith('.0'):
-                    frota_raw = frota_raw[:-2]
-
-                data_raw  = str(r.get(col_map_found.get('data', ''),   '') or '').strip()
-                comb_raw  = str(r.get(col_map_found.get('tipo_combustivel', ''), '') or '').strip()
-                litros    = _parse_number(r.get(col_map_found.get('volume_litros', ''), 0))
-                preco     = _parse_number(r.get(col_map_found.get('preco_litro', ''),  0))
-                total     = _parse_number(r.get(col_map_found.get('valor_total', ''),  0))
-                km_ant    = _parse_number(r.get(col_map_found.get('km_anterior', ''), 0)) or 0
-                km_now    = _parse_number(r.get(col_map_found.get('km_atual', ''),    0))
-
-                if km_now is None or litros is None or litros <= 0:
-                    continue
-
-                comb_norm  = _normalize_combustivel(comb_raw)
-                km_rod     = (km_now - km_ant) if km_ant and km_ant > 0 else None
-                rendimento = (
-                    round(km_rod / litros, 2)
-                    if km_rod and km_rod > 0 and litros > 0 else None
-                )
-
-                # ── Localizar veículo: placa → frota ──────────────────────
-                veiculo_id = db_handler.get_vehicle_by_placa_or_frota(
-                    identificacao, frota_raw
-                )
-
-                # Determinar método de localização
-                match_method = '—'
-                if veiculo_id:
-                    # Verifica se achou por placa ou frota
-                    v_match = vehicles_df[vehicles_df['id'] == veiculo_id]
-                    if not v_match.empty:
-                        if v_match.iloc[0]['placa'].upper() == identificacao.upper():
-                            match_method = '🔵 Placa'
-                        else:
-                            match_method = '🟣 Frota'
-
-                # Dados para exibição
-                placa_display  = identificacao
-                modelo_display = '—'
-                frota_display  = frota_raw or '—'
-                tem_frota_db   = False
-
-                if veiculo_id:
-                    v_row = vehicles_df[vehicles_df['id'] == veiculo_id]
-                    if not v_row.empty:
-                        placa_display  = v_row.iloc[0]['placa']
-                        modelo_display = v_row.iloc[0]['modelo']
-                        frota_db = str(v_row.iloc[0].get('numero_frota', '') or '')
-                        tem_frota_db = (frota_db not in ('', 'nan'))
-                        if not tem_frota_db and frota_raw:
-                            frota_display = f"{frota_raw} 🆕"  # será atualizado
-
-                # ── Validações ────────────────────────────────────────────
-                alertas = []
-                if km_ant > 0 and km_now < km_ant:
-                    alertas.append("⚠️ KM atual < KM anterior")
-                if km_rod and km_rod > 2000:
-                    alertas.append("⚠️ KM rodados alto (verificar)")
-                if rendimento and rendimento < 2:
-                    alertas.append("⚠️ Rendimento suspeito")
-                if not veiculo_id:
-                    alertas.append("❓ Veículo não cadastrado")
-
-                rows.append({
-                    # Dados para importação
-                    'identificacao': identificacao,
-                    'frota':         frota_raw,
-                    'veiculo_id':    veiculo_id,
-                    'data':          data_raw,
-                    'comb_norm':     comb_norm,
-                    'litros':        litros,
-                    'preco':         preco or 0,
-                    'total':         total or round(litros * (preco or 0), 2),
-                    'km_anterior':   km_ant,
-                    'km_atual':      km_now,
-                    'km_rodados':    km_rod,
-                    'rendimento':    rendimento,
-                    'lote':          lote,
-                    'sincronizar_frota': bool(veiculo_id and frota_raw and not tem_frota_db),
-                    # Dados para exibição
-                    'placa':         placa_display,
-                    'modelo':        modelo_display,
-                    'frota_display': frota_display,
-                    'combustivel':   comb_raw,
-                    'match':         match_method if veiculo_id else '❓ Não encontrado',
-                    'alertas':       ' | '.join(alertas) if alertas else '✅ OK',
-                })
-
-            if not rows:
-                st.warning("Nenhum registro válido encontrado no arquivo.")
-                st.stop()
-
-            preview_df = pd.DataFrame(rows)
-
-            # ── Métricas do preview ────────────────────────────────────────
-            st.markdown("### 👁️ Preview — Dados a Importar")
-
-            total_reg    = len(preview_df)
-            identificados = int(preview_df['veiculo_id'].notna().sum())
-            nao_cadastr  = int(preview_df['veiculo_id'].isna().sum())
-            a_sincronizar = int(preview_df['sincronizar_frota'].sum())
-            com_alerta   = int((preview_df['alertas'] != '✅ OK').sum())
-
-            c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("Total Registros",     total_reg)
-            c2.metric("✅ Identificados",     identificados)
-            c3.metric("❓ Não Cadastrados",   nao_cadastr)
-            c4.metric("🔄 Vincular Frota",    a_sincronizar,
-                      help="Veículos que terão o Nº de Frota atualizado no cadastro")
-            c5.metric("⚠️ Com Alertas",      com_alerta)
-
-            # ── Tabela de preview ──────────────────────────────────────────
-            disp = preview_df[[
-                'match', 'frota_display', 'placa', 'modelo',
-                'data', 'combustivel', 'litros', 'total',
-                'km_anterior', 'km_atual', 'km_rodados', 'rendimento', 'alertas'
-            ]].copy()
-            disp.columns = [
-                'Localizado por', 'Frota', 'Placa', 'Modelo',
-                'Data', 'Combustível', 'Litros', 'Total R$',
-                'Km Ant.', 'Km Atual', 'Km Rodados', 'km/L', 'Status'
-            ]
-
-            def _style_row(row):
-                if row['Status'] != '✅ OK':
-                    return ['background-color: #fff3cd'] * len(row)
-                if row['Localizado por'] == '❓ Não encontrado':
-                    return ['background-color: #f8d7da'] * len(row)
-                return [''] * len(row)
-
-            st.dataframe(
-                disp.style.apply(_style_row, axis=1),
-                use_container_width=True, hide_index=True
-            )
-
-            # ── Reconciliação: veículos não encontrados ────────────────────
-            nao_encontrados = preview_df[preview_df['veiculo_id'].isna()].copy()
-            if not nao_encontrados.empty:
-                with st.expander(
-                    f"⚠️ {len(nao_encontrados)} registro(s) com veículo NÃO CADASTRADO — "
-                    "clique para reconciliar", expanded=True
-                ):
-                    st.markdown(
-                        "Estes registros têm **Identificação** e/ou **Frota** que não "
-                        "foram encontrados no cadastro de veículos. Você pode vincular "
-                        "manualmente ou ignorar."
-                    )
-                    # Group by unique (identificacao, frota)
-                    uniq = (
-                        nao_encontrados[['identificacao', 'frota', 'comb_norm']]
-                        .drop_duplicates()
-                        .reset_index(drop=True)
-                    )
-
-                    all_vehicles_opts = {
-                        f"{row['placa']} — {row['modelo']} (Frota: {row.get('numero_frota','—') or '—'})": row['id']
-                        for _, row in vehicles_df.iterrows()
-                    }
-                    vehicle_opts_list = ['(Ignorar / Não vincular)'] + list(all_vehicles_opts.keys())
-
-                    if 'reconciliacao' not in st.session_state:
-                        st.session_state['reconciliacao'] = {}
-
-                    for idx, urow in uniq.iterrows():
-                        key = f"rec_{urow['identificacao']}_{urow['frota']}"
-                        st.write(
-                            f"**ID:** `{urow['identificacao']}` | "
-                            f"**Frota:** `{urow['frota']}` | "
-                            f"**Combustível:** `{urow['comb_norm']}`"
-                        )
-                        sel = st.selectbox(
-                            "Vincular a qual veículo cadastrado?",
-                            vehicle_opts_list,
-                            key=key
-                        )
-                        if sel != '(Ignorar / Não vincular)':
-                            st.session_state['reconciliacao'][key] = {
-                                'identificacao': urow['identificacao'],
-                                'frota': urow['frota'],
-                                'veiculo_id': all_vehicles_opts[sel],
-                            }
-                        st.divider()
-
-                    if st.button("✅ Aplicar Vínculos de Reconciliação"):
-                        # Apply reconciliation to preview_df
-                        for key, link in st.session_state.get('reconciliacao', {}).items():
-                            mask = (
-                                (preview_df['identificacao'] == link['identificacao']) &
-                                (preview_df['frota'] == link['frota'])
+        if uploaded is not None:
+            try:
+                # ── Leitura ───────────────────────────────────────────────
+                if uploaded.name.endswith(('.xlsx', '.xls')):
+                    raw_df = pd.read_excel(uploaded, dtype=str)
+                else:
+                    content = uploaded.read()
+                    raw_df = None
+                    for sep in [';', ',', '\t']:
+                        try:
+                            tmp = pd.read_csv(
+                                io.BytesIO(content), sep=sep,
+                                dtype=str, encoding='utf-8-sig'
                             )
-                            preview_df.loc[mask, 'veiculo_id'] = link['veiculo_id']
-                            preview_df.loc[mask, 'sincronizar_frota'] = True
-                            preview_df.loc[mask, 'alertas'] = '✅ OK (vinculado)'
-                        st.session_state['preview_df_reconciled'] = preview_df
-                        st.success("Vínculos aplicados! Confirme a importação abaixo.")
-                        st.rerun()
+                            if len(tmp.columns) > 3:
+                                raw_df = tmp
+                                break
+                        except Exception:
+                            continue
+                    if raw_df is None:
+                        st.error(
+                            "Não foi possível ler o arquivo. "
+                            "Verifique o separador (`;` ou `,`)."
+                        )
+                        raw_df = pd.DataFrame()
 
-            # Usa preview reconciliado se existir
-            if 'preview_df_reconciled' in st.session_state:
-                preview_df = st.session_state['preview_df_reconciled']
-
-            # ── Opções e botão de importação ───────────────────────────────
-            st.divider()
-            col_btn, col_opts = st.columns([1, 2])
-            with col_opts:
-                import_invalid = st.checkbox(
-                    "Importar registros com alertas também",
-                    value=True,
-                    help="Desmarcando, apenas registros '✅ OK' serão importados"
-                )
-                sync_frota_opt = st.checkbox(
-                    "Atualizar Nº de Frota nos veículos cadastrados",
-                    value=True,
-                    help="Vincula automaticamente o número de frota da planilha ao cadastro do veículo"
-                )
-
-            with col_btn:
-                if st.button("🔄 Confirmar Importação", type="primary",
-                             use_container_width=True):
-                    rows_to_import = (
-                        preview_df if import_invalid
-                        else preview_df[preview_df['alertas'].str.startswith('✅')]
+                if not raw_df.empty:
+                    st.success(
+                        f"✅ **{len(raw_df)} linhas** lidas | "
+                        f"Colunas: `{', '.join(raw_df.columns.tolist())}`"
                     )
 
-                    success_count = 0
-                    error_count   = 0
-                    frota_sync_count = 0
-                    progress = st.progress(0)
-                    status_txt = st.empty()
+                    # ── Mapeamento de colunas ─────────────────────────────
+                    col_map_found = {
+                        field: _find_col(raw_df.columns.tolist(), candidates)
+                        for field, candidates in COL_MAP.items()
+                    }
 
-                    # Reload vehicles for sync
-                    vehicles_df_fresh = db_handler.get_vehicles()
+                    obrig_faltando = [
+                        f for f, c in col_map_found.items()
+                        if c is None and f in ('identificacao', 'numero_frota',
+                                               'km_atual', 'volume_litros')
+                    ]
 
-                    for i, (_, rec) in enumerate(rows_to_import.iterrows()):
-                        ok, _ = db_handler.add_abastecimento(
-                            veiculo_id      = rec['veiculo_id'],
-                            identificacao   = rec['identificacao'],
-                            numero_frota    = rec['frota'],
-                            data            = rec['data'],
-                            tipo_combustivel= rec['comb_norm'],
-                            volume_litros   = rec['litros'],
-                            preco_litro     = rec['preco'],
-                            valor_total     = rec['total'],
-                            km_anterior     = rec['km_anterior'],
-                            km_atual_bomba  = rec['km_atual'],
-                            lote_importacao = rec['lote'],
+                    if obrig_faltando:
+                        st.error(
+                            f"❌ Colunas obrigatórias não encontradas: "
+                            f"`{obrig_faltando}`\n\n"
+                            f"Colunas no arquivo: `{raw_df.columns.tolist()}`"
                         )
-                        if ok:
-                            success_count += 1
-                            # Sincronizar número de frota
-                            if (sync_frota_opt and rec.get('sincronizar_frota')
-                                    and rec['veiculo_id'] and rec['frota']):
-                                synced = _sync_frota_number(
-                                    int(rec['veiculo_id']),
-                                    rec['frota'],
-                                    vehicles_df_fresh
-                                )
-                                if synced:
-                                    frota_sync_count += 1
+                    else:
+                        # ── Normalização ──────────────────────────────────
+                        vehicles_df = db_handler.get_vehicles()
+                        lote = f"lote_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                        rows = _build_rows(raw_df, col_map_found, vehicles_df, lote)
+
+                        if not rows:
+                            st.warning("Nenhum registro válido encontrado no arquivo.")
                         else:
-                            error_count += 1
+                            preview_df = pd.DataFrame(rows)
 
-                        progress.progress((i + 1) / len(rows_to_import))
-                        status_txt.text(f"Processando {i + 1}/{len(rows_to_import)}…")
+                            # Usa versão reconciliada se existir
+                            if 'preview_df_reconciled' in st.session_state:
+                                preview_df = st.session_state['preview_df_reconciled']
 
-                    progress.empty()
-                    status_txt.empty()
+                            # ── Métricas ──────────────────────────────────
+                            st.markdown("### 👁️ Preview — Dados a Importar")
+                            a_sincronizar = int(preview_df['sincronizar_frota'].sum())
+                            c1, c2, c3, c4, c5 = st.columns(5)
+                            c1.metric("Total",             len(preview_df))
+                            c2.metric("✅ Identificados",   int(preview_df['veiculo_id'].notna().sum()))
+                            c3.metric("❓ Não Cadastrados", int(preview_df['veiculo_id'].isna().sum()))
+                            c4.metric("🔄 Vincular Frota",  a_sincronizar)
+                            c5.metric("⚠️ Com Alertas",    int((preview_df['alertas'] != '✅ OK').sum()))
 
-                    # Limpa reconciliação da sessão
-                    st.session_state.pop('preview_df_reconciled', None)
-                    st.session_state.pop('reconciliacao', None)
+                            # ── Tabela de preview ─────────────────────────
+                            disp = preview_df[[
+                                'match', 'frota_display', 'placa', 'modelo',
+                                'data', 'combustivel', 'litros', 'total',
+                                'km_anterior', 'km_atual', 'km_rodados',
+                                'rendimento', 'alertas'
+                            ]].copy()
+                            disp.columns = [
+                                'Localizado por', 'Frota', 'Placa', 'Modelo',
+                                'Data', 'Combustível', 'Litros', 'Total R$',
+                                'Km Ant.', 'Km Atual', 'Km Rodados', 'km/L', 'Status'
+                            ]
 
-                    st.success(f"✅ **{success_count}** registros importados!")
-                    if frota_sync_count:
-                        st.info(f"🔄 **{frota_sync_count}** veículo(s) tiveram o Nº de Frota atualizado.")
-                    if error_count:
-                        st.error(f"❌ {error_count} registros com erro.")
-                    if success_count > 0:
-                        st.balloons()
+                            def _style_row(row):
+                                if row['Status'] != '✅ OK':
+                                    return ['background-color: #fff3cd'] * len(row)
+                                if row['Localizado por'] == '❓ Não encontrado':
+                                    return ['background-color: #f8d7da'] * len(row)
+                                return [''] * len(row)
 
-        except Exception as e:
-            st.error(f"Erro ao processar arquivo: {e}")
-            import traceback
-            st.code(traceback.format_exc())
+                            st.dataframe(
+                                disp.style.apply(_style_row, axis=1),
+                                use_container_width=True, hide_index=True
+                            )
 
-    # ─── TAB 2 • Análise por Veículo ─────────────────────────────────────────
+                            # ── Reconciliação manual ──────────────────────
+                            nao_encontrados = preview_df[
+                                preview_df['veiculo_id'].isna()
+                            ].copy()
+
+                            if not nao_encontrados.empty:
+                                with st.expander(
+                                    f"⚠️ {len(nao_encontrados)} registro(s) com "
+                                    "veículo NÃO CADASTRADO — clique para reconciliar",
+                                    expanded=False
+                                ):
+                                    st.caption(
+                                        "Vincule manualmente o registro ao veículo "
+                                        "correspondente no sistema."
+                                    )
+                                    uniq = (
+                                        nao_encontrados[
+                                            ['identificacao', 'frota', 'comb_norm']
+                                        ]
+                                        .drop_duplicates()
+                                        .reset_index(drop=True)
+                                    )
+                                    all_v_opts = {
+                                        f"{r['placa']} — {r['modelo']} "
+                                        f"(Frota: {r.get('numero_frota','—') or '—'})": r['id']
+                                        for _, r in vehicles_df.iterrows()
+                                    }
+                                    opts_list = [
+                                        '(Ignorar / Não vincular)'
+                                    ] + list(all_v_opts.keys())
+
+                                    if 'reconciliacao' not in st.session_state:
+                                        st.session_state['reconciliacao'] = {}
+
+                                    for idx, urow in uniq.iterrows():
+                                        key = f"rec_{urow['identificacao']}_{urow['frota']}"
+                                        st.write(
+                                            f"**ID:** `{urow['identificacao']}` | "
+                                            f"**Frota:** `{urow['frota']}` | "
+                                            f"**Combustível:** `{urow['comb_norm']}`"
+                                        )
+                                        sel = st.selectbox(
+                                            "Vincular a qual veículo?",
+                                            opts_list, key=key
+                                        )
+                                        if sel != '(Ignorar / Não vincular)':
+                                            st.session_state['reconciliacao'][key] = {
+                                                'identificacao': urow['identificacao'],
+                                                'frota':         urow['frota'],
+                                                'veiculo_id':    all_v_opts[sel],
+                                            }
+                                        st.divider()
+
+                                    if st.button("✅ Aplicar Vínculos"):
+                                        for key, link in st.session_state.get(
+                                            'reconciliacao', {}
+                                        ).items():
+                                            mask = (
+                                                (preview_df['identificacao'] ==
+                                                 link['identificacao']) &
+                                                (preview_df['frota'] == link['frota'])
+                                            )
+                                            preview_df.loc[mask, 'veiculo_id'] = \
+                                                link['veiculo_id']
+                                            preview_df.loc[mask, 'sincronizar_frota'] = True
+                                            preview_df.loc[mask, 'alertas'] = \
+                                                '✅ OK (vinculado)'
+                                        st.session_state['preview_df_reconciled'] = \
+                                            preview_df
+                                        st.success("Vínculos aplicados!")
+                                        st.rerun()
+
+                            # ── Opções e importação ───────────────────────
+                            st.divider()
+                            col_btn, col_opts = st.columns([1, 2])
+                            with col_opts:
+                                import_invalid = st.checkbox(
+                                    "Importar registros com alertas também",
+                                    value=True
+                                )
+                                sync_frota_opt = st.checkbox(
+                                    "Vincular Nº de Frota ao cadastro do veículo",
+                                    value=True
+                                )
+
+                            with col_btn:
+                                if st.button(
+                                    "🔄 Confirmar Importação",
+                                    type="primary",
+                                    use_container_width=True
+                                ):
+                                    rows_import = (
+                                        preview_df if import_invalid
+                                        else preview_df[
+                                            preview_df['alertas'].str.startswith('✅')
+                                        ]
+                                    )
+
+                                    success_count = error_count = frota_sync = 0
+                                    prog = st.progress(0)
+                                    info = st.empty()
+                                    veh_fresh = db_handler.get_vehicles()
+
+                                    for i, (_, rec) in enumerate(
+                                        rows_import.iterrows()
+                                    ):
+                                        ok, _ = db_handler.add_abastecimento(
+                                            veiculo_id       = rec['veiculo_id'],
+                                            identificacao    = rec['identificacao'],
+                                            numero_frota     = rec['frota'],
+                                            data             = rec['data'],
+                                            tipo_combustivel = rec['comb_norm'],
+                                            volume_litros    = rec['litros'],
+                                            preco_litro      = rec['preco'],
+                                            valor_total      = rec['total'],
+                                            km_anterior      = rec['km_anterior'],
+                                            km_atual_bomba   = rec['km_atual'],
+                                            lote_importacao  = rec['lote'],
+                                        )
+                                        if ok:
+                                            success_count += 1
+                                            if (sync_frota_opt
+                                                    and rec.get('sincronizar_frota')
+                                                    and rec['veiculo_id']
+                                                    and rec['frota']):
+                                                if _sync_frota_number(
+                                                    int(rec['veiculo_id']),
+                                                    rec['frota'], veh_fresh
+                                                ):
+                                                    frota_sync += 1
+                                        else:
+                                            error_count += 1
+
+                                        prog.progress((i + 1) / len(rows_import))
+                                        info.text(
+                                            f"Processando {i+1}/{len(rows_import)}…"
+                                        )
+
+                                    prog.empty()
+                                    info.empty()
+                                    st.session_state.pop(
+                                        'preview_df_reconciled', None
+                                    )
+                                    st.session_state.pop('reconciliacao', None)
+
+                                    st.success(
+                                        f"✅ **{success_count}** registros importados!"
+                                    )
+                                    if frota_sync:
+                                        st.info(
+                                            f"🔄 **{frota_sync}** veículo(s) com "
+                                            "Nº de Frota atualizado."
+                                        )
+                                    if error_count:
+                                        st.error(
+                                            f"❌ {error_count} registros com erro."
+                                        )
+                                    if success_count > 0:
+                                        st.balloons()
+
+            except Exception as e:
+                import traceback
+                st.error(f"Erro ao processar arquivo: {e}")
+                st.code(traceback.format_exc())
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # TAB 2 — Análise por Veículo
+    # ═══════════════════════════════════════════════════════════════════════
     with tab2:
         st.subheader("Análise por Veículo")
+        vehicles_df2 = db_handler.get_vehicles()
 
-        vehicles_df = db_handler.get_vehicles()
-        if vehicles_df.empty:
+        if vehicles_df2.empty:
             st.info("Nenhum veículo cadastrado.")
-            st.stop()
+        else:
+            all_fuel = db_handler.get_abastecimentos()
 
-        all_fuel = db_handler.get_abastecimentos()
-        if all_fuel.empty:
-            st.info("Nenhum abastecimento importado ainda. Use a aba '📥 Importar Planilha'.")
-            st.stop()
-
-        # Selectbox com placa + frota para facilitar identificação
-        def _vehicle_label(row):
-            frota = str(row.get('numero_frota', '') or '').strip()
-            frota_str = f" | Frota {frota}" if frota and frota != 'nan' else ''
-            return f"{row['placa']} — {row['modelo']}{frota_str}"
-
-        # Filtra apenas veículos que têm dados de abastecimento
-        ids_com_dados = set(all_fuel['veiculo_id'].dropna().astype(int).tolist())
-        veh_com_dados = vehicles_df[vehicles_df['id'].isin(ids_com_dados)]
-
-        options = {_vehicle_label(r): r['id'] for _, r in veh_com_dados.iterrows()}
-
-        if not options:
-            st.info("Nenhum veículo com dados de abastecimento importados.")
-            st.stop()
-
-        # Busca por frota ou placa
-        busca = st.text_input("🔍 Buscar por Placa ou Nº de Frota", "").strip()
-        if busca:
-            options = {
-                k: v for k, v in options.items()
-                if busca.lower() in k.lower()
-            }
-            if not options:
-                st.warning("Nenhum veículo encontrado para a busca.")
-                st.stop()
-
-        sel_label = st.selectbox("Selecione o Veículo", list(options.keys()))
-        sel_id    = options[sel_label]
-
-        vdf = db_handler.get_abastecimentos(veiculo_id=sel_id)
-        if vdf.empty:
-            st.info("Nenhum abastecimento registrado para este veículo.")
-            st.stop()
-
-        v_data   = db_handler.get_vehicle_by_id(sel_id)
-        comb_key = (v_data or {}).get('tipo_combustivel', 'flex') or 'flex'
-        ref      = RENDIMENTO_REF.get(comb_key, RENDIMENTO_REF['flex'])
-        valid    = vdf[vdf['rendimento_kml'].notna() & (vdf['rendimento_kml'] > 0)]
-
-        # Cabeçalho do veículo
-        frota_info = v_data.get('numero_frota', '') or ''
-        st.markdown(
-            f"#### 🚗 {v_data['modelo']} — Placa `{v_data['placa']}`"
-            + (f" | Frota `{frota_info}`" if frota_info else '')
-        )
-
-        # Métricas
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Abastecimentos",  len(vdf))
-        c2.metric("Total Litros",    f"{vdf['volume_litros'].sum():,.1f} L")
-        c3.metric("Gasto Total",     f"R$ {vdf['valor_total'].sum():,.2f}")
-        med_rend   = valid['rendimento_kml'].mean() if not valid.empty else 0
-        delta_rend = f"{med_rend - ref['esperado']:+.1f} vs ref."
-        c4.metric("Média km/L",  f"{med_rend:.2f}", delta_rend)
-
-        if not valid.empty:
-            if med_rend < ref['alerta']:
-                st.error(
-                    f"🔴 Rendimento CRÍTICO! Média {med_rend:.2f} km/L "
-                    f"(alertar abaixo de {ref['alerta']} km/L para {ref['label']})"
-                )
-            elif med_rend < ref['esperado']:
-                st.warning(
-                    f"🟡 Rendimento abaixo do esperado "
-                    f"({ref['esperado']} km/L para {ref['label']})"
+            if all_fuel.empty:
+                st.info(
+                    "Nenhum abastecimento importado ainda. "
+                    "Use a aba '📥 Importar Planilha'."
                 )
             else:
-                st.success(f"🟢 Rendimento OK para {ref['label']}")
+                ids_com_dados = set(
+                    all_fuel['veiculo_id'].dropna().astype(int).tolist()
+                )
+                veh_com = vehicles_df2[vehicles_df2['id'].isin(ids_com_dados)]
 
-        st.markdown("#### Histórico de Abastecimentos")
-        hist = vdf[[
-            'data', 'tipo_combustivel', 'volume_litros',
-            'valor_total', 'km_anterior', 'km_atual',
-            'km_rodados', 'rendimento_kml'
-        ]].copy()
-        hist.columns = [
-            'Data', 'Combustível', 'Litros', 'Total R$',
-            'Km Ant.', 'Km Atual', 'Km Rodados', 'km/L'
-        ]
-        st.dataframe(hist, use_container_width=True, hide_index=True)
+                def _veh_label(row):
+                    frota = str(row.get('numero_frota', '') or '').strip()
+                    return (
+                        f"Frota {frota} — {row['placa']} — {row['modelo']}"
+                        if frota and frota != 'nan'
+                        else f"{row['placa']} — {row['modelo']}"
+                    )
 
-    # ─── TAB 3 • Painel da Frota ─────────────────────────────────────────────
+                options = {_veh_label(r): r['id'] for _, r in veh_com.iterrows()}
+
+                if not options:
+                    st.info("Nenhum veículo com dados de abastecimento.")
+                else:
+                    busca = st.text_input(
+                        "🔍 Buscar por Placa, Frota ou Modelo", ""
+                    ).strip()
+                    if busca:
+                        options = {
+                            k: v for k, v in options.items()
+                            if busca.lower() in k.lower()
+                        }
+
+                    if not options:
+                        st.warning("Nenhum veículo para a busca informada.")
+                    else:
+                        sel_label = st.selectbox(
+                            "Selecione o Veículo", list(options.keys())
+                        )
+                        sel_id = options[sel_label]
+                        vdf    = db_handler.get_abastecimentos(veiculo_id=sel_id)
+
+                        if vdf.empty:
+                            st.info(
+                                "Nenhum abastecimento registrado para este veículo."
+                            )
+                        else:
+                            v_data   = db_handler.get_vehicle_by_id(sel_id)
+                            comb_key = (
+                                (v_data or {}).get('tipo_combustivel', 'flex')
+                                or 'flex'
+                            )
+                            ref   = RENDIMENTO_REF.get(comb_key,
+                                                       RENDIMENTO_REF['flex'])
+                            valid = vdf[
+                                vdf['rendimento_kml'].notna()
+                                & (vdf['rendimento_kml'] > 0)
+                            ]
+
+                            frota_info = (v_data or {}).get('numero_frota', '') or ''
+                            st.markdown(
+                                f"#### 🚗 {v_data['modelo']} — Placa "
+                                f"`{v_data['placa']}`"
+                                + (f" | Frota `{frota_info}`" if frota_info else "")
+                            )
+
+                            c1, c2, c3, c4 = st.columns(4)
+                            c1.metric("Abastecimentos", len(vdf))
+                            c2.metric("Total Litros",
+                                      f"{vdf['volume_litros'].sum():,.1f} L")
+                            c3.metric("Gasto Total",
+                                      f"R$ {vdf['valor_total'].sum():,.2f}")
+                            med_rend = (
+                                valid['rendimento_kml'].mean()
+                                if not valid.empty else 0
+                            )
+                            c4.metric(
+                                "Média km/L", f"{med_rend:.2f}",
+                                f"{med_rend - ref['esperado']:+.1f} vs ref."
+                            )
+
+                            if not valid.empty:
+                                if med_rend < ref['alerta']:
+                                    st.error(
+                                        f"🔴 Rendimento CRÍTICO! "
+                                        f"Média {med_rend:.2f} km/L "
+                                        f"(alerta: {ref['alerta']} km/L)"
+                                    )
+                                elif med_rend < ref['esperado']:
+                                    st.warning(
+                                        f"🟡 Abaixo do esperado "
+                                        f"({ref['esperado']} km/L para "
+                                        f"{ref['label']})"
+                                    )
+                                else:
+                                    st.success(
+                                        f"🟢 Rendimento OK para {ref['label']}"
+                                    )
+
+                            st.markdown("#### Histórico de Abastecimentos")
+                            hist = vdf[[
+                                'data', 'tipo_combustivel', 'volume_litros',
+                                'valor_total', 'km_anterior', 'km_atual',
+                                'km_rodados', 'rendimento_kml'
+                            ]].copy()
+                            hist.columns = [
+                                'Data', 'Combustível', 'Litros', 'Total R$',
+                                'Km Ant.', 'Km Atual', 'Km Rodados', 'km/L'
+                            ]
+                            st.dataframe(
+                                hist, use_container_width=True, hide_index=True
+                            )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # TAB 3 — Painel da Frota
+    # ═══════════════════════════════════════════════════════════════════════
     with tab3:
         st.subheader("🏭 Painel Geral da Frota")
-
         summary_df = db_handler.get_fleet_fuel_summary()
 
         if summary_df.empty:
-            st.info("Nenhum dado disponível. Importe uma planilha primeiro.")
-            st.stop()
-
-        # Totais
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Veículos com Dados",   len(summary_df))
-        c2.metric("Total Litros",         f"{summary_df['total_litros'].sum():,.0f} L")
-        c3.metric("Gasto Total",          f"R$ {summary_df['total_gasto'].sum():,.2f}")
-        c4.metric("Total KM Rodados",     f"{summary_df['total_km_rodados'].sum():,.0f} km")
-
-        st.divider()
-
-        # Filtro por frota ou placa
-        filtro = st.text_input("🔍 Filtrar por Placa, Frota ou Modelo", "").strip().lower()
-
-        st.markdown("#### 📋 Tabela Comparativa (ordenada por Nº de Frota)")
-
-        rows_display = []
-        for _, r in summary_df.iterrows():
-            comb_key = str(r.get('combustivel', 'flex') or 'flex').lower()
-            if 's10' in comb_key:   comb_key = 'diesel_s10'
-            elif 'diesel' in comb_key: comb_key = 'diesel_s10'
-            elif 'gasolina' in comb_key: comb_key = 'gasolina'
-            ref = RENDIMENTO_REF.get(comb_key, RENDIMENTO_REF['flex'])
-            med = r['media_rendimento']
-
-            if pd.isna(med) or med == 0:
-                status = '⚪ Sem dados'
-            elif med < ref['alerta']:
-                status = '🔴 Crítico'
-            elif med < ref['esperado']:
-                status = '🟡 Atenção'
-            else:
-                status = '🟢 OK'
-
-            frota_val = str(r.get('frota', '') or '—')
-            placa_val = str(r.get('placa', '—'))
-            modelo_val = str(r.get('modelo', '—'))
-
-            # Filtro
-            if filtro and not any(
-                filtro in v.lower()
-                for v in [frota_val, placa_val, modelo_val]
-            ):
-                continue
-
-            rows_display.append({
-                'Frota':       frota_val,
-                'Placa':       placa_val,
-                'Modelo':      modelo_val,
-                'Combustível': str(r.get('combustivel', '—')),
-                'Abastec.':    int(r.get('total_abastecimentos', 0) or 0),
-                'Total L':     f"{r['total_litros']:,.1f}" if pd.notna(r['total_litros']) else '—',
-                'Gasto R$':    f"{r['total_gasto']:,.2f}"  if pd.notna(r['total_gasto'])  else '—',
-                'KM Rodados':  f"{r['total_km_rodados']:,.0f}" if pd.notna(r['total_km_rodados']) else '—',
-                'Média km/L':  f"{med:.2f}" if pd.notna(med) else '—',
-                'Status':      status,
-            })
-
-        if rows_display:
-            disp_df = pd.DataFrame(rows_display)
-            # Sort by fleet number numerically when possible
-            try:
-                disp_df['_frota_num'] = pd.to_numeric(disp_df['Frota'], errors='coerce')
-                disp_df = disp_df.sort_values('_frota_num').drop(columns='_frota_num')
-            except Exception:
-                pass
-            st.dataframe(disp_df, use_container_width=True, hide_index=True)
+            st.info(
+                "Nenhum dado disponível. "
+                "Importe uma planilha na aba '📥 Importar Planilha'."
+            )
         else:
-            st.info("Nenhum registro para o filtro informado.")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Veículos com Dados",
+                      len(summary_df))
+            c2.metric("Total Litros",
+                      f"{summary_df['total_litros'].sum():,.0f} L")
+            c3.metric("Gasto Total",
+                      f"R$ {summary_df['total_gasto'].sum():,.2f}")
+            c4.metric("Total KM Rodados",
+                      f"{summary_df['total_km_rodados'].sum():,.0f} km")
 
-        # Ranking
-        st.divider()
-        col_best, col_worst = st.columns(2)
-        valid_summary = summary_df.dropna(subset=['media_rendimento'])
-        valid_summary = valid_summary[valid_summary['media_rendimento'] > 0]
+            st.divider()
+            filtro = st.text_input(
+                "🔍 Filtrar por Placa, Frota ou Modelo", ""
+            ).strip().lower()
 
-        with col_best:
-            st.markdown("#### 🏆 Mais Eficientes (km/L)")
-            if not valid_summary.empty:
-                top = valid_summary.nlargest(5, 'media_rendimento')[
-                    ['frota', 'placa', 'modelo', 'media_rendimento']
-                ].copy()
-                top.columns = ['Frota', 'Placa', 'Modelo', 'km/L']
-                top['km/L'] = top['km/L'].apply(lambda x: f"{x:.2f}")
-                st.dataframe(top, use_container_width=True, hide_index=True)
+            st.markdown("#### 📋 Tabela Comparativa (ordenada por Nº de Frota)")
 
-        with col_worst:
-            st.markdown("#### ⚠️ Menos Eficientes (km/L)")
-            if not valid_summary.empty:
-                bot = valid_summary.nsmallest(5, 'media_rendimento')[
-                    ['frota', 'placa', 'modelo', 'media_rendimento']
-                ].copy()
-                bot.columns = ['Frota', 'Placa', 'Modelo', 'km/L']
-                bot['km/L'] = bot['km/L'].apply(lambda x: f"{x:.2f}")
-                st.dataframe(bot, use_container_width=True, hide_index=True)
+            rows_display = []
+            for _, r in summary_df.iterrows():
+                ck = str(r.get('combustivel', 'flex') or 'flex').lower()
+                if 's10' in ck:     ck = 'diesel_s10'
+                elif 'diesel' in ck:  ck = 'diesel_s10'
+                elif 'gasolina' in ck: ck = 'gasolina'
+                ref = RENDIMENTO_REF.get(ck, RENDIMENTO_REF['flex'])
+                med = r['media_rendimento']
+
+                if pd.isna(med) or med == 0:  status = '⚪ Sem dados'
+                elif med < ref['alerta']:      status = '🔴 Crítico'
+                elif med < ref['esperado']:    status = '🟡 Atenção'
+                else:                         status = '🟢 OK'
+
+                frota_v  = str(r.get('frota',  '') or '—')
+                placa_v  = str(r.get('placa',  '—'))
+                modelo_v = str(r.get('modelo', '—'))
+
+                if filtro and not any(
+                    filtro in v.lower()
+                    for v in [frota_v, placa_v, modelo_v]
+                ):
+                    continue
+
+                rows_display.append({
+                    'Frota':       frota_v,
+                    'Placa':       placa_v,
+                    'Modelo':      modelo_v,
+                    'Combustível': str(r.get('combustivel', '—')),
+                    'Abastec.':    int(r.get('total_abastecimentos', 0) or 0),
+                    'Total L':     (f"{r['total_litros']:,.1f}"
+                                   if pd.notna(r['total_litros']) else '—'),
+                    'Gasto R$':    (f"{r['total_gasto']:,.2f}"
+                                   if pd.notna(r['total_gasto']) else '—'),
+                    'KM Rodados':  (f"{r['total_km_rodados']:,.0f}"
+                                   if pd.notna(r['total_km_rodados']) else '—'),
+                    'Média km/L':  (f"{med:.2f}" if pd.notna(med) else '—'),
+                    'Status':      status,
+                })
+
+            if rows_display:
+                disp_df = pd.DataFrame(rows_display)
+                try:
+                    disp_df['_n'] = pd.to_numeric(
+                        disp_df['Frota'], errors='coerce'
+                    )
+                    disp_df = disp_df.sort_values('_n').drop(columns='_n')
+                except Exception:
+                    pass
+                st.dataframe(
+                    disp_df, use_container_width=True, hide_index=True
+                )
+            else:
+                st.info("Nenhum registro para o filtro informado.")
+
+            st.divider()
+            col_best, col_worst = st.columns(2)
+            v_sum = summary_df.dropna(subset=['media_rendimento'])
+            v_sum = v_sum[v_sum['media_rendimento'] > 0]
+
+            with col_best:
+                st.markdown("#### 🏆 Mais Eficientes (km/L)")
+                if not v_sum.empty:
+                    top = v_sum.nlargest(5, 'media_rendimento')[
+                        ['frota', 'placa', 'modelo', 'media_rendimento']
+                    ].copy()
+                    top.columns = ['Frota', 'Placa', 'Modelo', 'km/L']
+                    top['km/L'] = top['km/L'].apply(lambda x: f"{x:.2f}")
+                    st.dataframe(top, use_container_width=True, hide_index=True)
+
+            with col_worst:
+                st.markdown("#### ⚠️ Menos Eficientes (km/L)")
+                if not v_sum.empty:
+                    bot = v_sum.nsmallest(5, 'media_rendimento')[
+                        ['frota', 'placa', 'modelo', 'media_rendimento']
+                    ].copy()
+                    bot.columns = ['Frota', 'Placa', 'Modelo', 'km/L']
+                    bot['km/L'] = bot['km/L'].apply(lambda x: f"{x:.2f}")
+                    st.dataframe(bot, use_container_width=True, hide_index=True)
